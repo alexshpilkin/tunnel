@@ -94,9 +94,7 @@ func main() {
 						reqs = nil
 						continue
 					}
-					if req.WantReply {
-						req.Reply(false, nil)
-					}
+					req.Reply(false, nil)
 				case ch, ok := <-chans:
 					if !ok {
 						chans = nil
