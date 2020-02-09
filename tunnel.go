@@ -1,6 +1,7 @@
 package main
 
 import (
+	"flag"
 	"io"
 	"io/ioutil"
 	"log"
@@ -277,14 +278,19 @@ func (s *Server) ListenAndServe() error {
 }
 
 func main() {
-	server := &Server{SSHAddr: ":2222", HTTPAddr: ":8080"}
+	sshAddrPtr := flag.String("bind-ssh", "", "bind address for the SSH server")
+	httpAddrPtr := flag.String("bind-http", "", "bind address for the HTTP server")
+	hostKeyPtr := flag.String("host-key", "./ssh_host_key", "host key file")
+	flag.Parse()
+
+	server := &Server{SSHAddr: *sshAddrPtr, HTTPAddr: *httpAddrPtr}
 
 	server.SSHConfig = &ssh.ServerConfig{
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			return nil, nil
 		},
 	}
-	privateBytes, err := ioutil.ReadFile("./ssh_host_key")
+	privateBytes, err := ioutil.ReadFile(*hostKeyPtr)
 	if err != nil {
 		log.Fatal(err)
 	}
