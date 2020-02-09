@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"io/ioutil"
 	"log"
@@ -31,11 +32,11 @@ type Server struct {
 	HTTPAddr  string
 	SSHConfig *ssh.ServerConfig
 	hosts     sync.Map
-	proxy     *httputil.ReverseProxy
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if _, ok := s.hosts.Load(req.Host); !ok {
+	t, ok := s.hosts.Load(req.Host)
+	if !ok {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, `<html>
@@ -48,20 +49,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if s.proxy == nil {
-		s.proxy = &httputil.ReverseProxy{
-			Director: s.director,
-		}
+	proxy := httputil.ReverseProxy{
+		Director:  director,
+		Transport: t.(http.RoundTripper),
 	}
-	s.proxy.ServeHTTP(w, req)
+	proxy.ServeHTTP(w, req)
 }
 
-func (s *Server) director(req *http.Request) {
+func director(req *http.Request) {
 	req.URL.Scheme = "http"
 	req.URL.Host = req.Host
 	if _, ok := req.Header["User-Agent"]; !ok {
 		req.Header.Set("User-Agent", "")
 	}
+}
+
+func (s *Server) transport(conn *ssh.ServerConn) http.RoundTripper {
+	dial := func(network, addr string) (net.Conn, error) {
+		return nil, errors.New("not implemented")
+	}
+	return &http.Transport{Dial: dial}
 }
 
 func (s *Server) serveSSH(l net.Listener) error {
@@ -96,7 +103,7 @@ func (s *Server) serveSSH(l net.Listener) error {
 							req.Reply(false, nil)
 							continue
 						}
-						if _, ok := s.hosts.LoadOrStore(payload.Addr, conn); ok {
+						if _, ok := s.hosts.LoadOrStore(payload.Addr, s.transport(conn)); ok {
 							req.Reply(false, nil)
 							continue
 						}
