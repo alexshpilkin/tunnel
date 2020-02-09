@@ -11,13 +11,13 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
-type handler struct {
-	Hosts map[string]string
+type Server struct {
+	hosts map[string]string
 	proxy *httputil.ReverseProxy
 }
 
-func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if _, ok := h.Hosts[req.Host]; !ok {
+func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	if _, ok := s.hosts[req.Host]; !ok {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, `<html>
@@ -30,14 +30,14 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if h.proxy == nil {
-		h.proxy = &httputil.ReverseProxy{Director: h.director}
+	if s.proxy == nil {
+		s.proxy = &httputil.ReverseProxy{Director: s.director}
 	}
-	h.proxy.ServeHTTP(w, req)
+	s.proxy.ServeHTTP(w, req)
 }
 
-func (h *handler) director(req *http.Request) {
-	host := h.Hosts[req.Host]
+func (s *Server) director(req *http.Request) {
+	host := s.hosts[req.Host]
 	req.URL.Scheme = "https"
 	req.URL.Host = host
 	req.Host = host
@@ -61,9 +61,7 @@ type cancelTCPIPForward struct {
 }
 
 func main() {
-	handler := &handler{Hosts: map[string]string{
-		"localhost:8080": "example.com",
-	}}
+	server := &Server{}
 
 	config := &ssh.ServerConfig{
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
@@ -81,7 +79,7 @@ func main() {
 	config.AddHostKey(private)
 
 	go func() {
-		log.Fatal(http.ListenAndServe(":8080", handler))
+		log.Fatal(http.ListenAndServe(":8080", server))
 	}()
 
 	ln, err := net.Listen("tcp", ":2222")
