@@ -1,14 +1,15 @@
 package main
 
 import (
-	"errors"
 	"io"
 	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"strings"
 	"sync"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -27,6 +28,59 @@ type cancelTCPIPForward struct {
 	Port uint32
 }
 
+type forwardedTCPIP struct {
+	Addr       string
+	Port       uint32
+	OriginAddr string
+	OriginPort uint32
+}
+
+type chanConn struct {
+	Chan ssh.Channel
+}
+
+func (c *chanConn) Read(b []byte) (int, error) {
+	return c.Chan.Read(b)
+}
+
+func (c *chanConn) Write(b []byte) (int, error) {
+	return c.Chan.Write(b)
+}
+
+func (c *chanConn) Close() error {
+	return c.Chan.Close()
+}
+
+func (c *chanConn) LocalAddr() net.Addr {
+	panic("chanConn: LocalAddr")
+}
+
+func (c *chanConn) RemoteAddr() net.Addr {
+	panic("chanConn: RemoteAddr")
+}
+
+func (c *chanConn) SetDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *chanConn) SetReadDeadline(t time.Time) error {
+	return nil
+}
+
+func (c *chanConn) SetWriteDeadline(t time.Time) error {
+	return nil
+}
+
+func isDomainName(s string) bool {
+	// Very loose validation to exclude port numbers.  Only for lowercase strings.
+	for _, r := range s {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' && r != '.' {
+			return false
+		}
+	}
+	return true
+}
+
 type Server struct {
 	SSHAddr   string
 	HTTPAddr  string
@@ -35,7 +89,7 @@ type Server struct {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	t, ok := s.hosts.Load(req.Host)
+	t, ok := s.hosts.Load(strings.ToLower(req.Host))
 	if !ok {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusNotFound)
@@ -58,15 +112,42 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 func director(req *http.Request) {
 	req.URL.Scheme = "http"
-	req.URL.Host = req.Host
+	host := strings.ToLower(req.Host)
+	req.URL.Host = host
+	req.Host = host
 	if _, ok := req.Header["User-Agent"]; !ok {
 		req.Header.Set("User-Agent", "")
 	}
 }
 
-func (s *Server) transport(conn *ssh.ServerConn) http.RoundTripper {
+func (s *Server) transport(conn *ssh.ServerConn, host string) http.RoundTripper {
 	dial := func(network, addr string) (net.Conn, error) {
-		return nil, errors.New("not implemented")
+		if network != "tcp" && network != "tcp4" && network != "tcp6" {
+			panic("invalid network in dial")
+		}
+
+		host_, serv, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		if host_ != strings.ToLower(host) {
+			panic("invalid host in dial")
+		}
+		port, err := net.LookupPort(network, serv)
+		if err != nil {
+			return nil, err
+		}
+		if port != 80 {
+			panic("invalid port in dial")
+		}
+
+		payload := forwardedTCPIP{Addr: host, Port: 80, OriginAddr: "0.0.0.0", OriginPort: 0}
+		ch, reqs, err := conn.OpenChannel("forwarded-tcpip", ssh.Marshal(&payload))
+		if err != nil {
+			return nil, err
+		}
+		go ssh.DiscardRequests(reqs)
+		return &chanConn{ch}, nil
 	}
 	return &http.Transport{Dial: dial}
 }
@@ -99,15 +180,17 @@ func (s *Server) serveSSH(l net.Listener) error {
 							req.Reply(false, nil)
 							continue
 						}
-						if payload.Port != 0 && payload.Port != 80 {
+						host := strings.ToLower(payload.Addr)
+						if !isDomainName(host) || payload.Port != 0 && payload.Port != 80 {
 							req.Reply(false, nil)
 							continue
 						}
-						if _, ok := s.hosts.LoadOrStore(payload.Addr, s.transport(conn)); ok {
+						transport := s.transport(conn, payload.Addr)
+						if _, ok := s.hosts.LoadOrStore(host, transport); ok {
 							req.Reply(false, nil)
 							continue
 						}
-						hosts[payload.Addr] = struct{}{}
+						hosts[host] = struct{}{}
 						replyPayload := tcpipForwardSuccess{Port: 80}
 						req.Reply(true, ssh.Marshal(&replyPayload))
 					} else if req.Type == "cancel-tcpip-forward" {
@@ -116,11 +199,12 @@ func (s *Server) serveSSH(l net.Listener) error {
 							req.Reply(false, nil)
 							continue
 						}
+						host := strings.ToLower(payload.Addr)
 						if payload.Port != 80 {
 							req.Reply(false, nil)
 							continue
 						}
-						if _, ok := hosts[payload.Addr]; ok {
+						if _, ok := hosts[host]; ok {
 							req.Reply(false, nil)
 							continue
 						}
