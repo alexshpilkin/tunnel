@@ -2,9 +2,13 @@ package main
 
 import (
 	"io"
+	"io/ioutil"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
+
+	"golang.org/x/crypto/ssh"
 )
 
 type handler struct {
@@ -46,5 +50,61 @@ func main() {
 	handler := &handler{Hosts: map[string]string{
 		"localhost:8080": "example.com",
 	}}
-	log.Fatal(http.ListenAndServe(":8080", handler))
+
+	config := &ssh.ServerConfig{
+		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			return nil, nil
+		},
+	}
+	privateBytes, err := ioutil.ReadFile("./ssh_host_key")
+	if err != nil {
+		log.Fatal(err)
+	}
+	private, err := ssh.ParsePrivateKey(privateBytes)
+	if err != nil {
+		log.Fatal(err)
+	}
+	config.AddHostKey(private)
+
+	go func() {
+		log.Fatal(http.ListenAndServe(":8080", handler))
+	}()
+
+	ln, err := net.Listen("tcp", ":2222")
+	if err != nil {
+		log.Fatal(err)
+	}
+	for {
+		rw, err := ln.Accept()
+		if err != nil {
+			log.Print(err)
+			continue
+		}
+		go func() {
+			_, chans, reqs, err := ssh.NewServerConn(rw, config)
+			if err != nil {
+				log.Print(err)
+				return
+			}
+
+			for reqs != nil && chans != nil {
+				select {
+				case req, ok := <-reqs:
+					if !ok {
+						reqs = nil
+						continue
+					}
+					if req.WantReply {
+						req.Reply(false, nil)
+					}
+				case ch, ok := <-chans:
+					if !ok {
+						chans = nil
+						continue
+					}
+					ch.Reject(ssh.UnknownChannelType, "No incoming channels accepted")
+				}
+			}
+		}()
+	}
 }
