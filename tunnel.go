@@ -11,9 +11,26 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+type tcpipForward struct {
+	Addr string
+	Port uint32
+}
+
+type tcpipForwardSuccess struct {
+	Port uint32
+}
+
+type cancelTCPIPForward struct {
+	Addr string
+	Port uint32
+}
+
 type Server struct {
-	hosts map[string]string
-	proxy *httputil.ReverseProxy
+	SSHAddr   string
+	HTTPAddr  string
+	SSHConfig *ssh.ServerConfig
+	hosts     map[string]string
+	proxy     *httputil.ReverseProxy
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
@@ -46,54 +63,15 @@ func (s *Server) director(req *http.Request) {
 	}
 }
 
-type tcpipForward struct {
-	Addr string
-	Port uint32
-}
-
-type tcpipForwardSuccess struct {
-	Port uint32
-}
-
-type cancelTCPIPForward struct {
-	Addr string
-	Port uint32
-}
-
-func main() {
-	server := &Server{}
-
-	config := &ssh.ServerConfig{
-		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			return nil, nil
-		},
-	}
-	privateBytes, err := ioutil.ReadFile("./ssh_host_key")
-	if err != nil {
-		log.Fatal(err)
-	}
-	private, err := ssh.ParsePrivateKey(privateBytes)
-	if err != nil {
-		log.Fatal(err)
-	}
-	config.AddHostKey(private)
-
-	go func() {
-		log.Fatal(http.ListenAndServe(":8080", server))
-	}()
-
-	ln, err := net.Listen("tcp", ":2222")
-	if err != nil {
-		log.Fatal(err)
-	}
+func (s *Server) serveSSH(l net.Listener) error {
 	for {
-		rw, err := ln.Accept()
+		rw, err := l.Accept()
 		if err != nil {
 			log.Print(err)
 			continue
 		}
 		go func() {
-			_, chans, reqs, err := ssh.NewServerConn(rw, config)
+			_, chans, reqs, err := ssh.NewServerConn(rw, s.SSHConfig)
 			if err != nil {
 				log.Print(err)
 				return
@@ -139,4 +117,72 @@ func main() {
 			}
 		}()
 	}
+}
+
+func (s *Server) serveHTTP(l net.Listener) error {
+	return http.Serve(l, s)
+}
+
+func (s *Server) Serve(sshL net.Listener, httpL net.Listener) error {
+	sshError := make(chan error, 1)
+	httpError := make(chan error, 1)
+
+	go func() {
+		sshError <- s.serveSSH(sshL)
+	}()
+	go func() {
+		httpError <- s.serveHTTP(httpL)
+	}()
+
+	select {
+	case e := <-sshError:
+		return e
+	case e := <-httpError:
+		return e
+	}
+}
+
+func (s *Server) ListenAndServe() error {
+	sshAddr := s.SSHAddr
+	if sshAddr == "" {
+		sshAddr = ":ssh"
+	}
+	sshL, err := net.Listen("tcp", sshAddr)
+	if err != nil {
+		return err
+	}
+	defer sshL.Close() // FIXME multiple close?
+
+	httpAddr := s.HTTPAddr
+	if httpAddr == "" {
+		httpAddr = ":http"
+	}
+	httpL, err := net.Listen("tcp", httpAddr)
+	if err != nil {
+		return err
+	}
+	defer httpL.Close() // FIXME multiple close?
+
+	return s.Serve(sshL, httpL)
+}
+
+func main() {
+	server := &Server{SSHAddr: ":2222", HTTPAddr: ":8080"}
+
+	server.SSHConfig = &ssh.ServerConfig{
+		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			return nil, nil
+		},
+	}
+	privateBytes, err := ioutil.ReadFile("./ssh_host_key")
+	if err != nil {
+		log.Fatal(err)
+	}
+	private, err := ssh.ParsePrivateKey(privateBytes)
+	if err != nil {
+		log.Fatal(err)
+	}
+	server.SSHConfig.AddHostKey(private)
+
+	log.Fatal(server.ListenAndServe())
 }
