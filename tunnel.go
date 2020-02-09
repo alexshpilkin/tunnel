@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"sync"
 
 	"golang.org/x/crypto/ssh"
 )
@@ -29,12 +30,12 @@ type Server struct {
 	SSHAddr   string
 	HTTPAddr  string
 	SSHConfig *ssh.ServerConfig
-	hosts     map[string]string
+	hosts     sync.Map
 	proxy     *httputil.ReverseProxy
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if _, ok := s.hosts[req.Host]; !ok {
+	if _, ok := s.hosts.Load(req.Host); !ok {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusNotFound)
 		io.WriteString(w, `<html>
@@ -48,16 +49,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if s.proxy == nil {
-		s.proxy = &httputil.ReverseProxy{Director: s.director}
+		s.proxy = &httputil.ReverseProxy{
+			Director: s.director,
+		}
 	}
 	s.proxy.ServeHTTP(w, req)
 }
 
 func (s *Server) director(req *http.Request) {
-	host := s.hosts[req.Host]
-	req.URL.Scheme = "https"
-	req.URL.Host = host
-	req.Host = host
+	req.URL.Scheme = "http"
+	req.URL.Host = req.Host
 	if _, ok := req.Header["User-Agent"]; !ok {
 		req.Header.Set("User-Agent", "")
 	}
@@ -71,12 +72,13 @@ func (s *Server) serveSSH(l net.Listener) error {
 			continue
 		}
 		go func() {
-			_, chans, reqs, err := ssh.NewServerConn(rw, s.SSHConfig)
+			conn, chans, reqs, err := ssh.NewServerConn(rw, s.SSHConfig)
 			if err != nil {
 				log.Print(err)
 				return
 			}
 
+			hosts := make(map[string]struct{})
 			for reqs != nil && chans != nil {
 				select {
 				case req, ok := <-reqs:
@@ -90,11 +92,15 @@ func (s *Server) serveSSH(l net.Listener) error {
 							req.Reply(false, nil)
 							continue
 						}
-						log.Printf("Forward: %v %v", payload.Addr, payload.Port)
 						if payload.Port != 0 && payload.Port != 80 {
 							req.Reply(false, nil)
 							continue
 						}
+						if _, ok := s.hosts.LoadOrStore(payload.Addr, conn); ok {
+							req.Reply(false, nil)
+							continue
+						}
+						hosts[payload.Addr] = struct{}{}
 						replyPayload := tcpipForwardSuccess{Port: 80}
 						req.Reply(true, ssh.Marshal(&replyPayload))
 					} else if req.Type == "cancel-tcpip-forward" {
@@ -103,10 +109,20 @@ func (s *Server) serveSSH(l net.Listener) error {
 							req.Reply(false, nil)
 							continue
 						}
-						log.Printf("Cancel forward: %v %v", payload.Addr, payload.Port)
+						if payload.Port != 80 {
+							req.Reply(false, nil)
+							continue
+						}
+						if _, ok := hosts[payload.Addr]; ok {
+							req.Reply(false, nil)
+							continue
+						}
+						s.hosts.Delete(payload.Addr)
+						delete(hosts, payload.Addr)
 						req.Reply(true, nil)
+					} else {
+						req.Reply(false, nil)
 					}
-					req.Reply(false, nil)
 				case ch, ok := <-chans:
 					if !ok {
 						chans = nil
@@ -114,6 +130,9 @@ func (s *Server) serveSSH(l net.Listener) error {
 					}
 					ch.Reject(ssh.UnknownChannelType, "No incoming channels accepted")
 				}
+			}
+			for host := range hosts {
+				s.hosts.Delete(host)
 			}
 		}()
 	}
