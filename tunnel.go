@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"io"
 	"io/ioutil"
@@ -220,7 +221,7 @@ func (s *Server) serveSSH(l net.Listener) error {
 						chans = nil
 						continue
 					}
-					ch.Reject(ssh.UnknownChannelType, "No incoming channels accepted")
+					ch.Reject(ssh.UnknownChannelType, "no incoming channels accepted")
 				}
 			}
 			for host := range hosts {
@@ -281,13 +282,32 @@ func main() {
 	sshAddrPtr := flag.String("bind-ssh", "", "bind address for the SSH server")
 	httpAddrPtr := flag.String("bind-http", "", "bind address for the HTTP server")
 	hostKeyPtr := flag.String("host-key", "./ssh_host_key", "host key file")
+	authKeysPtr := flag.String("authorized-keys", "./authorized_keys", "authorized keys file")
 	flag.Parse()
 
 	server := &Server{SSHAddr: *sshAddrPtr, HTTPAddr: *httpAddrPtr}
 
+	authKeys := make(map[string]struct{})
+	authKeysBytes, err := ioutil.ReadFile(*authKeysPtr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for len(authKeysBytes) > 0 {
+		key, _, _, rest, err := ssh.ParseAuthorizedKey(authKeysBytes)
+		if err != nil {
+			log.Print(err)
+		} else {
+			authKeys[string(key.Marshal())] = struct{}{}
+		}
+		authKeysBytes = rest
+	}
+
 	server.SSHConfig = &ssh.ServerConfig{
 		PublicKeyCallback: func(conn ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
-			return nil, nil
+			if _, ok := authKeys[string(key.Marshal())]; ok {
+				return nil, nil
+			}
+			return nil, errors.New("unknown public key")
 		},
 	}
 	privateBytes, err := ioutil.ReadFile(*hostKeyPtr)
