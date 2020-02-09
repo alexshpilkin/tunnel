@@ -46,6 +46,20 @@ func (h *handler) director(req *http.Request) {
 	}
 }
 
+type tcpipForward struct {
+	Addr string
+	Port uint32
+}
+
+type tcpipForwardSuccess struct {
+	Port uint32
+}
+
+type cancelTCPIPForward struct {
+	Addr string
+	Port uint32
+}
+
 func main() {
 	handler := &handler{Hosts: map[string]string{
 		"localhost:8080": "example.com",
@@ -93,6 +107,28 @@ func main() {
 					if !ok {
 						reqs = nil
 						continue
+					}
+					if req.Type == "tcpip-forward" {
+						var payload tcpipForward
+						if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+							req.Reply(false, nil)
+							continue
+						}
+						log.Printf("Forward: %v %v", payload.Addr, payload.Port)
+						if payload.Port != 0 && payload.Port != 80 {
+							req.Reply(false, nil)
+							continue
+						}
+						replyPayload := tcpipForwardSuccess{Port: 80}
+						req.Reply(true, ssh.Marshal(&replyPayload))
+					} else if req.Type == "cancel-tcpip-forward" {
+						var payload cancelTCPIPForward
+						if err := ssh.Unmarshal(req.Payload, &payload); err != nil {
+							req.Reply(false, nil)
+							continue
+						}
+						log.Printf("Cancel forward: %v %v", payload.Addr, payload.Port)
+						req.Reply(true, nil)
 					}
 					req.Reply(false, nil)
 				case ch, ok := <-chans:
