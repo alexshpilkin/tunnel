@@ -15,7 +15,7 @@ import (
 )
 
 type tcpipForward struct {
-	Addr string
+	Host string
 	Port uint32
 }
 
@@ -24,14 +24,14 @@ type tcpipForwardSuccess struct {
 }
 
 type cancelTCPIPForward struct {
-	Addr string
+	Host string
 	Port uint32
 }
 
 type forwardedTCPIP struct {
-	Addr       string
+	Host       string
 	Port       uint32
-	OriginAddr string
+	OriginHost string
 	OriginPort uint32
 }
 
@@ -141,7 +141,7 @@ func (s *Server) transport(conn *ssh.ServerConn, host string) http.RoundTripper 
 			panic("invalid port in dial")
 		}
 
-		payload := forwardedTCPIP{Addr: host, Port: 80, OriginAddr: "0.0.0.0", OriginPort: 0}
+		payload := forwardedTCPIP{Host: host, Port: 80, OriginHost: "0.0.0.0", OriginPort: 0}
 		ch, reqs, err := conn.OpenChannel("forwarded-tcpip", ssh.Marshal(&payload))
 		if err != nil {
 			return nil, err
@@ -180,12 +180,12 @@ func (s *Server) serveSSH(l net.Listener) error {
 							req.Reply(false, nil)
 							continue
 						}
-						host := strings.ToLower(payload.Addr)
+						host := strings.ToLower(payload.Host)
 						if !isDomainName(host) || payload.Port != 0 && payload.Port != 80 {
 							req.Reply(false, nil)
 							continue
 						}
-						transport := s.transport(conn, payload.Addr)
+						transport := s.transport(conn, payload.Host)
 						if _, ok := s.hosts.LoadOrStore(host, transport); ok {
 							req.Reply(false, nil)
 							continue
@@ -199,7 +199,7 @@ func (s *Server) serveSSH(l net.Listener) error {
 							req.Reply(false, nil)
 							continue
 						}
-						host := strings.ToLower(payload.Addr)
+						host := strings.ToLower(payload.Host)
 						if payload.Port != 80 {
 							req.Reply(false, nil)
 							continue
@@ -208,8 +208,8 @@ func (s *Server) serveSSH(l net.Listener) error {
 							req.Reply(false, nil)
 							continue
 						}
-						s.hosts.Delete(payload.Addr)
-						delete(hosts, payload.Addr)
+						s.hosts.Delete(payload.Host)
+						delete(hosts, payload.Host)
 						req.Reply(true, nil)
 					} else {
 						req.Reply(false, nil)
